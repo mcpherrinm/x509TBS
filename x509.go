@@ -1943,9 +1943,23 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		return nil, err
 	}
 
-	var publicKeyBytes []byte
-	var publicKeyAlgorithm pkix.AlgorithmIdentifier
-	publicKeyBytes, publicKeyAlgorithm, err = marshalPublicKey(key.Public())
+	tbsCSRContents, err := CreateTBSCertificateRequest(template, key.Public())
+	if err != nil {
+		return nil, err
+	}
+
+	return SignTBS(rand, tbsCSRContents, signatureAlgorithm, algorithmIdentifier, key)
+}
+
+// CreateTBSCertificateRequest builds the certificationRequestInfo portion of a
+// PKCS #10 CSR (RFC 2986) based on template, using the supplied public key.
+// The returned bytes are the DER encoding of the CertificationRequestInfo
+// SEQUENCE, ready to be signed with [SignTBS].
+//
+// The same fields of template are consulted as documented on
+// [CreateCertificateRequest].
+func CreateTBSCertificateRequest(template *CertificateRequest, pub any) ([]byte, error) {
+	publicKeyBytes, publicKeyAlgorithm, err := marshalPublicKey(pub)
 	if err != nil {
 		return nil, err
 	}
@@ -2058,12 +2072,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		RawAttributes: rawAttributes,
 	}
 
-	tbsCSRContents, err := asn1.Marshal(tbsCSR)
-	if err != nil {
-		return nil, err
-	}
-
-	return SignTBS(rand, tbsCSRContents, signatureAlgorithm, algorithmIdentifier, key)
+	return asn1.Marshal(tbsCSR)
 }
 
 // ParseCertificateRequest parses a single certificate request from the
@@ -2269,6 +2278,34 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 	if template == nil {
 		return nil, errors.New("x509: template can not be nil")
 	}
+
+	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(priv, template.SignatureAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+
+	tbsCertListContents, err := CreateTBSRevocationList(template, issuer, algorithmIdentifier)
+	if err != nil {
+		return nil, err
+	}
+
+	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, algorithmIdentifier, priv)
+}
+
+// CreateTBSRevocationList builds the tbsCertList portion of an X.509 v2 CRL,
+// according to RFC 5280, based on template. The returned bytes are the DER
+// encoding of the TBSCertList SEQUENCE, ready to be signed with [SignTBS].
+//
+// The issuer may not be nil, and the crlSign bit must be set in [KeyUsage] in
+// order to use it as a CRL issuer.
+//
+// The issuer distinguished name CRL field and authority key identifier
+// extension are populated using the issuer certificate. issuer must have
+// SubjectKeyId set.
+func CreateTBSRevocationList(template *RevocationList, issuer *Certificate, signatureAlgorithm pkix.AlgorithmIdentifier) ([]byte, error) {
+	if template == nil {
+		return nil, errors.New("x509: template can not be nil")
+	}
 	if issuer == nil {
 		return nil, errors.New("x509: issuer can not be nil")
 	}
@@ -2283,11 +2320,6 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 	}
 	if template.Number == nil {
 		return nil, errors.New("x509: template contains nil Number field")
-	}
-
-	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(priv, template.SignatureAlgorithm)
-	if err != nil {
-		return nil, err
 	}
 
 	var revokedCerts []pkix.RevokedCertificate
@@ -2369,7 +2401,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 
 	tbsCertList := tbsCertificateList{
 		Version:    1, // v2
-		Signature:  algorithmIdentifier,
+		Signature:  signatureAlgorithm,
 		Issuer:     asn1.RawValue{FullBytes: issuerSubject},
 		ThisUpdate: template.ThisUpdate.UTC(),
 		NextUpdate: template.NextUpdate.UTC(),
@@ -2392,12 +2424,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 		tbsCertList.Extensions = append(tbsCertList.Extensions, template.ExtraExtensions...)
 	}
 
-	tbsCertListContents, err := asn1.Marshal(tbsCertList)
-	if err != nil {
-		return nil, err
-	}
-
-	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, algorithmIdentifier, priv)
+	return asn1.Marshal(tbsCertList)
 }
 
 // CheckSignatureFrom verifies that the signature on rl is a valid signature

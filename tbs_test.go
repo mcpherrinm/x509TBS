@@ -20,7 +20,7 @@ var template = &x509TBS.Certificate{
 	NotAfter:              time.Now().Add(time.Hour),
 	BasicConstraintsValid: true,
 	IsCA:                  true,
-	KeyUsage:              x509TBS.KeyUsageCertSign,
+	KeyUsage:              x509TBS.KeyUsageCertSign | x509TBS.KeyUsageCRLSign,
 }
 
 func TestTBS(t *testing.T) {
@@ -55,6 +55,76 @@ func TestCreateCert(t *testing.T) {
 
 	if err := cert.CheckSignatureFrom(cert); err != nil {
 		t.Fatalf("CheckSignatureFrom: %v", err)
+	}
+}
+
+func TestTBSRevocationList(t *testing.T) {
+	priv := must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+
+	ecdsaWithSHA256 := pkix.AlgorithmIdentifier{
+		Algorithm: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2},
+	}
+
+	// Need a parsed issuer cert so SubjectKeyId is populated.
+	issuerDER := must(x509TBS.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv))
+	issuer := must(x509TBS.ParseCertificate(issuerDER))
+
+	crlTemplate := &x509TBS.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: time.Now().Add(-time.Hour),
+		NextUpdate: time.Now().Add(time.Hour),
+		RevokedCertificateEntries: []x509TBS.RevocationListEntry{
+			{
+				SerialNumber:   big.NewInt(42),
+				RevocationTime: time.Now().Add(-time.Minute),
+			},
+		},
+	}
+
+	tbs := must(x509TBS.CreateTBSRevocationList(crlTemplate, issuer, ecdsaWithSHA256))
+
+	// Lint the TBS, log it, etc
+
+	der := must(x509TBS.SignTBS(rand.Reader, tbs, x509TBS.ECDSAWithSHA256, ecdsaWithSHA256, priv))
+	rl := must(x509TBS.ParseRevocationList(der))
+
+	if err := rl.CheckSignatureFrom(issuer); err != nil {
+		t.Fatalf("CheckSignatureFrom: %v", err)
+	}
+
+	if len(rl.RevokedCertificateEntries) != 1 || rl.RevokedCertificateEntries[0].SerialNumber.Cmp(big.NewInt(42)) != 0 {
+		t.Fatalf("unexpected revoked entries: %+v", rl.RevokedCertificateEntries)
+	}
+}
+
+func TestTBSCertificateRequest(t *testing.T) {
+	priv := must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+
+	ecdsaWithSHA256 := pkix.AlgorithmIdentifier{
+		Algorithm: asn1.ObjectIdentifier{1, 2, 840, 10045, 4, 3, 2},
+	}
+
+	csrTemplate := &x509TBS.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "csr-test"},
+		DNSNames: []string{"example.com"},
+	}
+
+	tbs := must(x509TBS.CreateTBSCertificateRequest(csrTemplate, &priv.PublicKey))
+
+	// Lint the TBS, log it, etc
+
+	der := must(x509TBS.SignTBS(rand.Reader, tbs, x509TBS.ECDSAWithSHA256, ecdsaWithSHA256, priv))
+	csr := must(x509TBS.ParseCertificateRequest(der))
+
+	if err := csr.CheckSignature(); err != nil {
+		t.Fatalf("CheckSignature: %v", err)
+	}
+
+	if csr.Subject.CommonName != csrTemplate.Subject.CommonName {
+		t.Fatalf("Parsed CSR does not match expected subject, %s != %s", csr.Subject.CommonName, csrTemplate.Subject.CommonName)
+	}
+	if len(csr.DNSNames) != 1 || csr.DNSNames[0] != "example.com" {
+		t.Fatalf("Parsed CSR DNSNames mismatch: %v", csr.DNSNames)
 	}
 }
 
