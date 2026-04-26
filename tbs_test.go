@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"math/big"
@@ -47,7 +46,7 @@ func TestTBS(t *testing.T) {
 func TestCreateCert(t *testing.T) {
 	priv := must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
 	der := must(x509TBS.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv))
-	cert := must(x509.ParseCertificate(der))
+	cert := must(x509TBS.ParseCertificate(der))
 
 	if err := cert.CheckSignatureFrom(cert); err != nil {
 		t.Fatalf("CheckSignatureFrom: %v", err)

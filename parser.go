@@ -881,8 +881,6 @@ func processExtensions(out *Certificate) error {
 }
 
 func parseCertificate(der []byte) (*Certificate, error) {
-	cert := &Certificate{}
-
 	input := cryptobyte.String(der)
 	// we read the SEQUENCE including length and tag bytes so that
 	// we can populate Certificate.Raw, before unwrapping the
@@ -890,170 +888,29 @@ func parseCertificate(der []byte) (*Certificate, error) {
 	if !input.ReadASN1Element(&input, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: malformed certificate")
 	}
-	cert.Raw = input
+	raw := input
 	if !input.ReadASN1(&input, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: malformed certificate")
 	}
 
-	var tbs cryptobyte.String
-	// do the same trick again as above to extract the raw
-	// bytes for Certificate.RawTBSCertificate
-	if !input.ReadASN1Element(&tbs, cryptobyte_asn1.SEQUENCE) {
+	var tbsBytes cryptobyte.String
+	if !input.ReadASN1Element(&tbsBytes, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: malformed tbs certificate")
 	}
-	cert.RawTBSCertificate = tbs
-	if !tbs.ReadASN1(&tbs, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed tbs certificate")
+	cert, innerSigAISeq, err := parseTBSCertificate(tbsBytes)
+	if err != nil {
+		return nil, err
 	}
+	cert.Raw = raw
 
-	if !tbs.ReadOptionalASN1Integer(&cert.Version, cryptobyte_asn1.Tag(0).Constructed().ContextSpecific(), 0) {
-		return nil, errors.New("x509: malformed version")
-	}
-	if cert.Version < 0 {
-		return nil, errors.New("x509: malformed version")
-	}
-	// for backwards compat reasons Version is one-indexed,
-	// rather than zero-indexed as defined in 5280
-	cert.Version++
-	if cert.Version > 3 {
-		return nil, errors.New("x509: invalid version")
-	}
-
-	serial := new(big.Int)
-	if !tbs.ReadASN1Integer(serial) {
-		return nil, errors.New("x509: malformed serial number")
-	}
-	if serial.Sign() == -1 {
-		//if x509negativeserial.Value() != "1" {
-		return nil, errors.New("x509: negative serial number")
-		//} else {
-		//	x509negativeserial.IncNonDefault()
-		//}
-	}
-	cert.SerialNumber = serial
-
-	var sigAISeq cryptobyte.String
-	if !tbs.ReadASN1(&sigAISeq, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed signature algorithm identifier")
-	}
-	// Before parsing the inner algorithm identifier, extract
-	// the outer algorithm identifier and make sure that they
-	// match.
+	// The outer signature algorithm identifier must match the inner one
+	// byte-for-byte.
 	var outerSigAISeq cryptobyte.String
-	if !input.ReadASN1(&outerSigAISeq, cryptobyte_asn1.SEQUENCE) {
+	if !input.ReadASN1Element(&outerSigAISeq, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: malformed algorithm identifier")
 	}
-	if !bytes.Equal(outerSigAISeq, sigAISeq) {
+	if !bytes.Equal(outerSigAISeq, innerSigAISeq) {
 		return nil, errors.New("x509: inner and outer signature algorithm identifiers don't match")
-	}
-	sigAI, err := parseAI(sigAISeq)
-	if err != nil {
-		return nil, err
-	}
-	cert.SignatureAlgorithm = getSignatureAlgorithmFromAI(sigAI)
-
-	var issuerSeq cryptobyte.String
-	if !tbs.ReadASN1Element(&issuerSeq, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed issuer")
-	}
-	cert.RawIssuer = issuerSeq
-	issuerRDNs, err := parseName(issuerSeq)
-	if err != nil {
-		return nil, err
-	}
-	cert.Issuer.FillFromRDNSequence(issuerRDNs)
-
-	var validity cryptobyte.String
-	if !tbs.ReadASN1(&validity, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed validity")
-	}
-	cert.NotBefore, cert.NotAfter, err = parseValidity(validity)
-	if err != nil {
-		return nil, err
-	}
-
-	var subjectSeq cryptobyte.String
-	if !tbs.ReadASN1Element(&subjectSeq, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed issuer")
-	}
-	cert.RawSubject = subjectSeq
-	subjectRDNs, err := parseName(subjectSeq)
-	if err != nil {
-		return nil, err
-	}
-	cert.Subject.FillFromRDNSequence(subjectRDNs)
-
-	var spki cryptobyte.String
-	if !tbs.ReadASN1Element(&spki, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed spki")
-	}
-	cert.RawSubjectPublicKeyInfo = spki
-	if !spki.ReadASN1(&spki, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed spki")
-	}
-	var pkAISeq cryptobyte.String
-	if !spki.ReadASN1(&pkAISeq, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed public key algorithm identifier")
-	}
-	pkAI, err := parseAI(pkAISeq)
-	if err != nil {
-		return nil, err
-	}
-	cert.PublicKeyAlgorithm = getPublicKeyAlgorithmFromOID(pkAI.Algorithm)
-	var spk asn1.BitString
-	if !spki.ReadASN1BitString(&spk) {
-		return nil, errors.New("x509: malformed subjectPublicKey")
-	}
-	if cert.PublicKeyAlgorithm != UnknownPublicKeyAlgorithm {
-		cert.PublicKey, err = parsePublicKey(&publicKeyInfo{
-			Algorithm: pkAI,
-			PublicKey: spk,
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if cert.Version > 1 {
-		if !tbs.SkipOptionalASN1(cryptobyte_asn1.Tag(1).ContextSpecific()) {
-			return nil, errors.New("x509: malformed issuerUniqueID")
-		}
-		if !tbs.SkipOptionalASN1(cryptobyte_asn1.Tag(2).ContextSpecific()) {
-			return nil, errors.New("x509: malformed subjectUniqueID")
-		}
-		if cert.Version == 3 {
-			var extensions cryptobyte.String
-			var present bool
-			if !tbs.ReadOptionalASN1(&extensions, &present, cryptobyte_asn1.Tag(3).Constructed().ContextSpecific()) {
-				return nil, errors.New("x509: malformed extensions")
-			}
-			if present {
-				seenExts := make(map[string]bool)
-				if !extensions.ReadASN1(&extensions, cryptobyte_asn1.SEQUENCE) {
-					return nil, errors.New("x509: malformed extensions")
-				}
-				for !extensions.Empty() {
-					var extension cryptobyte.String
-					if !extensions.ReadASN1(&extension, cryptobyte_asn1.SEQUENCE) {
-						return nil, errors.New("x509: malformed extension")
-					}
-					ext, err := parseExtension(extension)
-					if err != nil {
-						return nil, err
-					}
-					oidStr := ext.Id.String()
-					if seenExts[oidStr] {
-						return nil, fmt.Errorf("x509: certificate contains duplicate extension with OID %q", oidStr)
-					}
-					seenExts[oidStr] = true
-					cert.Extensions = append(cert.Extensions, ext)
-				}
-				err = processExtensions(cert)
-				if err != nil {
-					return nil, err
-				}
-			}
-		}
 	}
 
 	var signature asn1.BitString
@@ -1063,6 +920,184 @@ func parseCertificate(der []byte) (*Certificate, error) {
 	cert.Signature = signature.RightAlign()
 
 	return cert, nil
+}
+
+// ParseTBSCertificate parses a TBSCertificate from the given ASN.1 DER data.
+// The input is the encoding of the TBSCertificate SEQUENCE itself, as produced
+// by CreateTBSCertificate.
+func ParseTBSCertificate(der []byte) (*Certificate, error) {
+	cert, _, err := parseTBSCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	if len(der) != len(cert.RawTBSCertificate) {
+		return nil, errors.New("x509: trailing data")
+	}
+	return cert, nil
+}
+
+// parseTBSCertificate parses a TBSCertificate DER element (including the outer
+// SEQUENCE header). It returns the populated Certificate and the raw inner
+// signature algorithm identifier element, which parseCertificate compares
+// byte-for-byte against the outer algorithm identifier.
+func parseTBSCertificate(der cryptobyte.String) (*Certificate, cryptobyte.String, error) {
+	cert := &Certificate{}
+
+	input := der
+	var tbs cryptobyte.String
+	if !input.ReadASN1Element(&tbs, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed tbs certificate")
+	}
+	cert.RawTBSCertificate = tbs
+	if !tbs.ReadASN1(&tbs, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed tbs certificate")
+	}
+
+	if !tbs.ReadOptionalASN1Integer(&cert.Version, cryptobyte_asn1.Tag(0).Constructed().ContextSpecific(), 0) {
+		return nil, nil, errors.New("x509: malformed version")
+	}
+	if cert.Version < 0 {
+		return nil, nil, errors.New("x509: malformed version")
+	}
+	// for backwards compat reasons Version is one-indexed,
+	// rather than zero-indexed as defined in 5280
+	cert.Version++
+	if cert.Version > 3 {
+		return nil, nil, errors.New("x509: invalid version")
+	}
+
+	serial := new(big.Int)
+	if !tbs.ReadASN1Integer(serial) {
+		return nil, nil, errors.New("x509: malformed serial number")
+	}
+	if serial.Sign() == -1 {
+		//if x509negativeserial.Value() != "1" {
+		return nil, nil, errors.New("x509: negative serial number")
+		//} else {
+		//	x509negativeserial.IncNonDefault()
+		//}
+	}
+	cert.SerialNumber = serial
+
+	var sigAISeq cryptobyte.String
+	if !tbs.ReadASN1Element(&sigAISeq, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed signature algorithm identifier")
+	}
+	sigAIContents := sigAISeq
+	if !sigAIContents.ReadASN1(&sigAIContents, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed signature algorithm identifier")
+	}
+	sigAI, err := parseAI(sigAIContents)
+	if err != nil {
+		return nil, nil, err
+	}
+	cert.SignatureAlgorithm = getSignatureAlgorithmFromAI(sigAI)
+
+	var issuerSeq cryptobyte.String
+	if !tbs.ReadASN1Element(&issuerSeq, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed issuer")
+	}
+	cert.RawIssuer = issuerSeq
+	issuerRDNs, err := parseName(issuerSeq)
+	if err != nil {
+		return nil, nil, err
+	}
+	cert.Issuer.FillFromRDNSequence(issuerRDNs)
+
+	var validity cryptobyte.String
+	if !tbs.ReadASN1(&validity, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed validity")
+	}
+	cert.NotBefore, cert.NotAfter, err = parseValidity(validity)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var subjectSeq cryptobyte.String
+	if !tbs.ReadASN1Element(&subjectSeq, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed issuer")
+	}
+	cert.RawSubject = subjectSeq
+	subjectRDNs, err := parseName(subjectSeq)
+	if err != nil {
+		return nil, nil, err
+	}
+	cert.Subject.FillFromRDNSequence(subjectRDNs)
+
+	var spki cryptobyte.String
+	if !tbs.ReadASN1Element(&spki, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed spki")
+	}
+	cert.RawSubjectPublicKeyInfo = spki
+	if !spki.ReadASN1(&spki, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed spki")
+	}
+	var pkAISeq cryptobyte.String
+	if !spki.ReadASN1(&pkAISeq, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed public key algorithm identifier")
+	}
+	pkAI, err := parseAI(pkAISeq)
+	if err != nil {
+		return nil, nil, err
+	}
+	cert.PublicKeyAlgorithm = getPublicKeyAlgorithmFromOID(pkAI.Algorithm)
+	var spk asn1.BitString
+	if !spki.ReadASN1BitString(&spk) {
+		return nil, nil, errors.New("x509: malformed subjectPublicKey")
+	}
+	if cert.PublicKeyAlgorithm != UnknownPublicKeyAlgorithm {
+		cert.PublicKey, err = parsePublicKey(&publicKeyInfo{
+			Algorithm: pkAI,
+			PublicKey: spk,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	if cert.Version > 1 {
+		if !tbs.SkipOptionalASN1(cryptobyte_asn1.Tag(1).ContextSpecific()) {
+			return nil, nil, errors.New("x509: malformed issuerUniqueID")
+		}
+		if !tbs.SkipOptionalASN1(cryptobyte_asn1.Tag(2).ContextSpecific()) {
+			return nil, nil, errors.New("x509: malformed subjectUniqueID")
+		}
+		if cert.Version == 3 {
+			var extensions cryptobyte.String
+			var present bool
+			if !tbs.ReadOptionalASN1(&extensions, &present, cryptobyte_asn1.Tag(3).Constructed().ContextSpecific()) {
+				return nil, nil, errors.New("x509: malformed extensions")
+			}
+			if present {
+				seenExts := make(map[string]bool)
+				if !extensions.ReadASN1(&extensions, cryptobyte_asn1.SEQUENCE) {
+					return nil, nil, errors.New("x509: malformed extensions")
+				}
+				for !extensions.Empty() {
+					var extension cryptobyte.String
+					if !extensions.ReadASN1(&extension, cryptobyte_asn1.SEQUENCE) {
+						return nil, nil, errors.New("x509: malformed extension")
+					}
+					ext, err := parseExtension(extension)
+					if err != nil {
+						return nil, nil, err
+					}
+					oidStr := ext.Id.String()
+					if seenExts[oidStr] {
+						return nil, nil, fmt.Errorf("x509: certificate contains duplicate extension with OID %q", oidStr)
+					}
+					seenExts[oidStr] = true
+					cert.Extensions = append(cert.Extensions, ext)
+				}
+				err = processExtensions(cert)
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+	}
+
+	return cert, sigAISeq, nil
 }
 
 // ParseCertificate parses a single certificate from the given ASN.1 DER data.
