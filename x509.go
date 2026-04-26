@@ -1640,6 +1640,24 @@ func CreateTBSCertificate(rand io.Reader, template, parent *Certificate, pub any
 	return tbsCertContents, nil
 }
 
+func SignTBSCertificate(rand io.Reader, tbsCertContents []byte, signatureAlgorithm SignatureAlgorithm, key crypto.Signer) ([]byte, error) {
+	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(key, signatureAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+
+	signature, err := signTBS(tbsCertContents, key, signatureAlgorithm, rand)
+	if err != nil {
+		return nil, err
+	}
+
+	return asn1.Marshal(certificate{
+		TBSCertificate:     asn1.RawValue{FullBytes: tbsCertContents},
+		SignatureAlgorithm: algorithmIdentifier,
+		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
+	})
+}
+
 func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv any) ([]byte, error) {
 	key, ok := priv.(crypto.Signer)
 	if !ok {
@@ -1666,16 +1684,7 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 		return nil, errors.New("x509: provided PrivateKey doesn't match parent's PublicKey")
 	}
 
-	signature, err := signTBS(tbsCertContents, key, signatureAlgorithm, rand)
-	if err != nil {
-		return nil, err
-	}
-
-	return asn1.Marshal(certificate{
-		TBSCertificate:     asn1.RawValue{FullBytes: tbsCertContents},
-		SignatureAlgorithm: algorithmIdentifier,
-		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	return SignTBSCertificate(rand, tbsCertContents, signatureAlgorithm, key)
 }
 
 // pemCRLPrefix is the magic string that indicates that we have a PEM encoded
