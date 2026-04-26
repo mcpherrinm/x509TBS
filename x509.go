@@ -1776,18 +1776,8 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 	if err != nil {
 		return nil, err
 	}
-	tbsCertList.Raw = tbsCertListContents
 
-	signature, err := signTBS(tbsCertListContents, key, signatureAlgorithm, rand)
-	if err != nil {
-		return nil, err
-	}
-
-	return asn1.Marshal(pkix.CertificateList{
-		TBSCertList:        tbsCertList,
-		SignatureAlgorithm: algorithmIdentifier,
-		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, key)
 }
 
 // CertificateRequest represents a PKCS #10, certificate signature request.
@@ -1953,7 +1943,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
 	}
 
-	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(key, template.SignatureAlgorithm)
+	signatureAlgorithm, _, err := signingParamsForKey(key, template.SignatureAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -2077,18 +2067,8 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 	if err != nil {
 		return nil, err
 	}
-	tbsCSR.Raw = tbsCSRContents
 
-	signature, err := signTBS(tbsCSRContents, key, signatureAlgorithm, rand)
-	if err != nil {
-		return nil, err
-	}
-
-	return asn1.Marshal(certificateRequest{
-		TBSCSR:             tbsCSR,
-		SignatureAlgorithm: algorithmIdentifier,
-		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	return SignTBS(rand, tbsCSRContents, signatureAlgorithm, key)
 }
 
 // ParseCertificateRequest parses a single certificate request from the
@@ -2266,12 +2246,6 @@ type RevocationList struct {
 //
 // Notably, we include issuer as an asn1.RawValue, mirroring the behavior of
 // tbsCertificate and allowing raw (unparsed) subjects to be passed cleanly.
-type certificateList struct {
-	TBSCertList        tbsCertificateList
-	SignatureAlgorithm pkix.AlgorithmIdentifier
-	SignatureValue     asn1.BitString
-}
-
 type tbsCertificateList struct {
 	Raw                 asn1.RawContent
 	Version             int `asn1:"optional,default:0"`
@@ -2428,20 +2402,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 		return nil, err
 	}
 
-	// Optimization to only marshal this struct once, when signing and
-	// then embedding in certificateList below.
-	tbsCertList.Raw = tbsCertListContents
-
-	signature, err := signTBS(tbsCertListContents, priv, signatureAlgorithm, rand)
-	if err != nil {
-		return nil, err
-	}
-
-	return asn1.Marshal(certificateList{
-		TBSCertList:        tbsCertList,
-		SignatureAlgorithm: algorithmIdentifier,
-		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
-	})
+	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, priv)
 }
 
 // CheckSignatureFrom verifies that the signature on rl is a valid signature
