@@ -98,7 +98,7 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 // These structures reflect the ASN.1 structure of X.509 certificates.:
 
 type certificate struct {
-	TBSCertificate     tbsCertificate
+	TBSCertificate     asn1.RawValue
 	SignatureAlgorithm pkix.AlgorithmIdentifier
 	SignatureValue     asn1.BitString
 }
@@ -1537,75 +1537,7 @@ func signTBS(tbs []byte, key crypto.Signer, sigAlg SignatureAlgorithm, rand io.R
 // just an empty SEQUENCE.
 var emptyASN1Subject = []byte{0x30, 0}
 
-// CreateCertificate creates a new X.509 v3 certificate based on a template.
-// The following members of template are currently used:
-//
-//   - AuthorityKeyId
-//   - BasicConstraintsValid
-//   - CRLDistributionPoints
-//   - DNSNames
-//   - EmailAddresses
-//   - ExcludedDNSDomains
-//   - ExcludedEmailAddresses
-//   - ExcludedIPRanges
-//   - ExcludedURIDomains
-//   - ExtKeyUsage
-//   - ExtraExtensions
-//   - IPAddresses
-//   - IsCA
-//   - IssuingCertificateURL
-//   - KeyUsage
-//   - MaxPathLen
-//   - MaxPathLenZero
-//   - NotAfter
-//   - NotBefore
-//   - OCSPServer
-//   - PermittedDNSDomains
-//   - PermittedDNSDomainsCritical
-//   - PermittedEmailAddresses
-//   - PermittedIPRanges
-//   - PermittedURIDomains
-//   - PolicyIdentifiers (see note below)
-//   - Policies (see note below)
-//   - SerialNumber
-//   - SignatureAlgorithm
-//   - Subject
-//   - SubjectKeyId
-//   - URIs
-//   - UnknownExtKeyUsage
-//
-// The certificate is signed by parent. If parent is equal to template then the
-// certificate is self-signed. The parameter pub is the public key of the
-// certificate to be generated and priv is the private key of the signer.
-//
-// The returned slice is the certificate in DER encoding.
-//
-// The currently supported key types are *rsa.PublicKey, *ecdsa.PublicKey and
-// ed25519.PublicKey. pub must be a supported key type, and priv must be a
-// crypto.Signer or crypto.MessageSigner with a supported public key.
-//
-// The AuthorityKeyId will be taken from the SubjectKeyId of parent, if any,
-// unless the resulting certificate is self-signed. Otherwise the value from
-// template will be used.
-//
-// If SubjectKeyId from template is empty and the template is a CA, SubjectKeyId
-// will be generated from the hash of the public key.
-//
-// If template.SerialNumber is nil, a serial number will be generated which
-// conforms to RFC 5280, Section 4.1.2.2 using entropy from rand.
-//
-// The PolicyIdentifier and Policies fields can both be used to marshal certificate
-// policy OIDs. By default, only the Policies is marshaled, but if the
-// GODEBUG setting "x509usepolicies" has the value "0", the PolicyIdentifiers field will
-// be marshaled instead of the Policies field. This changed in Go 1.24. The Policies field can
-// be used to marshal policy OIDs which have components that are larger than 31
-// bits.
-func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv any) ([]byte, error) {
-	key, ok := priv.(crypto.Signer)
-	if !ok {
-		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
-	}
-
+func CreateTBSCertificate(rand io.Reader, template, parent *Certificate, pub any, signatureAlgorithm pkix.AlgorithmIdentifier) ([]byte, error) {
 	serialNumber := template.SerialNumber
 	if serialNumber == nil {
 		// Generate a serial number following RFC 5280, Section 4.1.2.2 if one
@@ -1638,11 +1570,6 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 
 	if template.BasicConstraintsValid && !template.IsCA && template.MaxPathLen != -1 && (template.MaxPathLen != 0 || template.MaxPathLenZero) {
 		return nil, errors.New("x509: only CAs are allowed to specify MaxPathLen")
-	}
-
-	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(key, template.SignatureAlgorithm)
-	if err != nil {
-		return nil, err
 	}
 
 	publicKeyBytes, publicKeyAlgorithm, err := marshalPublicKey(pub)
@@ -1688,16 +1615,6 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 		//}
 	}
 
-	// Check that the signer's public key matches the private key, if available.
-	type privateKey interface {
-		Equal(crypto.PublicKey) bool
-	}
-	if privPub, ok := key.Public().(privateKey); !ok {
-		return nil, errors.New("x509: internal error: supported public key does not implement Equal")
-	} else if parent.PublicKey != nil && !privPub.Equal(parent.PublicKey) {
-		return nil, errors.New("x509: provided PrivateKey doesn't match parent's PublicKey")
-	}
-
 	extensions, err := buildCertExtensions(template, bytes.Equal(asn1Subject, emptyASN1Subject), authorityKeyId, subjectKeyId)
 	if err != nil {
 		return nil, err
@@ -1707,7 +1624,7 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 	c := tbsCertificate{
 		Version:            2,
 		SerialNumber:       serialNumber,
-		SignatureAlgorithm: algorithmIdentifier,
+		SignatureAlgorithm: signatureAlgorithm,
 		Issuer:             asn1.RawValue{FullBytes: asn1Issuer},
 		Validity:           validity{template.NotBefore.UTC(), template.NotAfter.UTC()},
 		Subject:            asn1.RawValue{FullBytes: asn1Subject},
@@ -1719,7 +1636,35 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 	if err != nil {
 		return nil, err
 	}
-	c.Raw = tbsCertContents
+
+	return tbsCertContents, nil
+}
+
+func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv any) ([]byte, error) {
+	key, ok := priv.(crypto.Signer)
+	if !ok {
+		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
+	}
+
+	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(key, template.SignatureAlgorithm)
+	if err != nil {
+		return nil, err
+	}
+
+	tbsCertContents, err := CreateTBSCertificate(rand, template, parent, pub, algorithmIdentifier)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check that the signer's public key matches the parent's public key, if available.
+	type privateKey interface {
+		Equal(crypto.PublicKey) bool
+	}
+	if privPub, ok := key.Public().(privateKey); !ok {
+		return nil, errors.New("x509: internal error: supported public key does not implement Equal")
+	} else if parent.PublicKey != nil && !privPub.Equal(parent.PublicKey) {
+		return nil, errors.New("x509: provided PrivateKey doesn't match parent's PublicKey")
+	}
 
 	signature, err := signTBS(tbsCertContents, key, signatureAlgorithm, rand)
 	if err != nil {
@@ -1727,7 +1672,7 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 	}
 
 	return asn1.Marshal(certificate{
-		TBSCertificate:     c,
+		TBSCertificate:     asn1.RawValue{FullBytes: tbsCertContents},
 		SignatureAlgorithm: algorithmIdentifier,
 		SignatureValue:     asn1.BitString{Bytes: signature, BitLength: len(signature) * 8},
 	})
