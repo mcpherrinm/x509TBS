@@ -34,6 +34,11 @@ func TestTBS(t *testing.T) {
 
 	// Lint the TBS, log it, etc
 
+	parsed := must(x509TBS.ParseTBSCertificate(tbs))
+	if parsed.Subject.CommonName != template.Subject.CommonName {
+		t.Fatalf("Parsed TBS certificate does not match expected subject, %s != %s", parsed.Subject.CommonName, template.Subject.CommonName)
+	}
+
 	der := must(x509TBS.SignTBSCertificate(rand.Reader, tbs, x509TBS.ECDSAWithSHA256, priv))
 	cert := must(x509TBS.ParseCertificate(der))
 
