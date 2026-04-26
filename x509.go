@@ -1646,12 +1646,7 @@ type signed struct {
 	SignatureValue     asn1.BitString
 }
 
-func SignTBS(rand io.Reader, tbs []byte, signatureAlgorithm SignatureAlgorithm, key crypto.Signer) ([]byte, error) {
-	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(key, signatureAlgorithm)
-	if err != nil {
-		return nil, err
-	}
-
+func SignTBS(rand io.Reader, tbs []byte, signatureAlgorithm SignatureAlgorithm, algorithmIdentifier pkix.AlgorithmIdentifier, key crypto.Signer) ([]byte, error) {
 	signature, err := signTBS(tbs, key, signatureAlgorithm, rand)
 	if err != nil {
 		return nil, err
@@ -1690,7 +1685,7 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 		return nil, errors.New("x509: provided PrivateKey doesn't match parent's PublicKey")
 	}
 
-	return SignTBS(rand, tbsCertContents, signatureAlgorithm, key)
+	return SignTBS(rand, tbsCertContents, signatureAlgorithm, algorithmIdentifier, key)
 }
 
 // pemCRLPrefix is the magic string that indicates that we have a PEM encoded
@@ -1777,7 +1772,7 @@ func (c *Certificate) CreateCRL(rand io.Reader, priv any, revokedCerts []pkix.Re
 		return nil, err
 	}
 
-	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, key)
+	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, algorithmIdentifier, key)
 }
 
 // CertificateRequest represents a PKCS #10, certificate signature request.
@@ -1943,7 +1938,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		return nil, errors.New("x509: certificate private key does not implement crypto.Signer")
 	}
 
-	signatureAlgorithm, _, err := signingParamsForKey(key, template.SignatureAlgorithm)
+	signatureAlgorithm, algorithmIdentifier, err := signingParamsForKey(key, template.SignatureAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -2068,7 +2063,7 @@ func CreateCertificateRequest(rand io.Reader, template *CertificateRequest, priv
 		return nil, err
 	}
 
-	return SignTBS(rand, tbsCSRContents, signatureAlgorithm, key)
+	return SignTBS(rand, tbsCSRContents, signatureAlgorithm, algorithmIdentifier, key)
 }
 
 // ParseCertificateRequest parses a single certificate request from the
@@ -2402,7 +2397,7 @@ func CreateRevocationList(rand io.Reader, template *RevocationList, issuer *Cert
 		return nil, err
 	}
 
-	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, priv)
+	return SignTBS(rand, tbsCertListContents, signatureAlgorithm, algorithmIdentifier, priv)
 }
 
 // CheckSignatureFrom verifies that the signature on rl is a valid signature
