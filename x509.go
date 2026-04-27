@@ -2090,32 +2090,53 @@ func ParseCertificateRequest(asn1Data []byte) (*CertificateRequest, error) {
 	return parseCertificateRequest(&csr)
 }
 
+// ParseTBSCertificateRequest parses a CertificationRequestInfo from the given
+// ASN.1 DER data. The input is the encoding of the CertificationRequestInfo
+// SEQUENCE itself, as produced by CreateTBSCertificateRequest.
+func ParseTBSCertificateRequest(der []byte) (*CertificateRequest, error) {
+	var tbs tbsCertificateRequest
+	rest, err := asn1.Unmarshal(der, &tbs)
+	if err != nil {
+		return nil, err
+	} else if len(rest) != 0 {
+		return nil, asn1.SyntaxError{Msg: "trailing data"}
+	}
+	return parseTBSCertificateRequest(&tbs)
+}
+
 func parseCertificateRequest(in *certificateRequest) (*CertificateRequest, error) {
+	out, err := parseTBSCertificateRequest(&in.TBSCSR)
+	if err != nil {
+		return nil, err
+	}
+	out.Raw = in.Raw
+	out.Signature = in.SignatureValue.RightAlign()
+	out.SignatureAlgorithm = getSignatureAlgorithmFromAI(in.SignatureAlgorithm)
+	return out, nil
+}
+
+func parseTBSCertificateRequest(in *tbsCertificateRequest) (*CertificateRequest, error) {
 	out := &CertificateRequest{
-		Raw:                      in.Raw,
-		RawTBSCertificateRequest: in.TBSCSR.Raw,
-		RawSubjectPublicKeyInfo:  in.TBSCSR.PublicKey.Raw,
-		RawSubject:               in.TBSCSR.Subject.FullBytes,
+		RawTBSCertificateRequest: in.Raw,
+		RawSubjectPublicKeyInfo:  in.PublicKey.Raw,
+		RawSubject:               in.Subject.FullBytes,
 
-		Signature:          in.SignatureValue.RightAlign(),
-		SignatureAlgorithm: getSignatureAlgorithmFromAI(in.SignatureAlgorithm),
+		PublicKeyAlgorithm: getPublicKeyAlgorithmFromOID(in.PublicKey.Algorithm.Algorithm),
 
-		PublicKeyAlgorithm: getPublicKeyAlgorithmFromOID(in.TBSCSR.PublicKey.Algorithm.Algorithm),
-
-		Version:    in.TBSCSR.Version,
-		Attributes: parseRawAttributes(in.TBSCSR.RawAttributes),
+		Version:    in.Version,
+		Attributes: parseRawAttributes(in.RawAttributes),
 	}
 
 	var err error
 	if out.PublicKeyAlgorithm != UnknownPublicKeyAlgorithm {
-		out.PublicKey, err = parsePublicKey(&in.TBSCSR.PublicKey)
+		out.PublicKey, err = parsePublicKey(&in.PublicKey)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	var subject pkix.RDNSequence
-	if rest, err := asn1.Unmarshal(in.TBSCSR.Subject.FullBytes, &subject); err != nil {
+	if rest, err := asn1.Unmarshal(in.Subject.FullBytes, &subject); err != nil {
 		return nil, err
 	} else if len(rest) != 0 {
 		return nil, errors.New("x509: trailing data after X.509 Subject")
@@ -2123,7 +2144,7 @@ func parseCertificateRequest(in *certificateRequest) (*CertificateRequest, error
 
 	out.Subject.FillFromRDNSequence(&subject)
 
-	if out.Extensions, err = parseCSRExtensions(in.TBSCSR.RawAttributes); err != nil {
+	if out.Extensions, err = parseCSRExtensions(in.RawAttributes); err != nil {
 		return nil, err
 	}
 

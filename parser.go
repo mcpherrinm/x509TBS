@@ -1138,8 +1138,6 @@ const x509v2Version = 1
 // ParseRevocationList parses a X509 v2 [Certificate] Revocation List from the given
 // ASN.1 DER data.
 func ParseRevocationList(der []byte) (*RevocationList, error) {
-	rl := &RevocationList{}
-
 	input := cryptobyte.String(der)
 	// we read the SEQUENCE including length and tag bytes so that
 	// we can populate RevocationList.Raw, before unwrapping the
@@ -1147,52 +1145,30 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 	if !input.ReadASN1Element(&input, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: malformed crl")
 	}
-	rl.Raw = input
+	raw := input
 	if !input.ReadASN1(&input, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: malformed crl")
 	}
 
-	var tbs cryptobyte.String
-	// do the same trick again as above to extract the raw
-	// bytes for Certificate.RawTBSCertificate
-	if !input.ReadASN1Element(&tbs, cryptobyte_asn1.SEQUENCE) {
+	var tbsBytes cryptobyte.String
+	if !input.ReadASN1Element(&tbsBytes, cryptobyte_asn1.SEQUENCE) {
 		return nil, errors.New("x509: malformed tbs crl")
 	}
-	rl.RawTBSRevocationList = tbs
-	if !tbs.ReadASN1(&tbs, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed tbs crl")
-	}
-
-	var version int
-	if !tbs.PeekASN1Tag(cryptobyte_asn1.INTEGER) {
-		return nil, errors.New("x509: unsupported crl version")
-	}
-	if !tbs.ReadASN1Integer(&version) {
-		return nil, errors.New("x509: malformed crl")
-	}
-	if version != x509v2Version {
-		return nil, fmt.Errorf("x509: unsupported crl version: %d", version)
-	}
-
-	var sigAISeq cryptobyte.String
-	if !tbs.ReadASN1(&sigAISeq, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed signature algorithm identifier")
-	}
-	// Before parsing the inner algorithm identifier, extract
-	// the outer algorithm identifier and make sure that they
-	// match.
-	var outerSigAISeq cryptobyte.String
-	if !input.ReadASN1(&outerSigAISeq, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed algorithm identifier")
-	}
-	if !bytes.Equal(outerSigAISeq, sigAISeq) {
-		return nil, errors.New("x509: inner and outer signature algorithm identifiers don't match")
-	}
-	sigAI, err := parseAI(sigAISeq)
+	rl, innerSigAISeq, err := parseTBSRevocationList(tbsBytes)
 	if err != nil {
 		return nil, err
 	}
-	rl.SignatureAlgorithm = getSignatureAlgorithmFromAI(sigAI)
+	rl.Raw = raw
+
+	// The outer signature algorithm identifier must match the inner one
+	// byte-for-byte.
+	var outerSigAISeq cryptobyte.String
+	if !input.ReadASN1Element(&outerSigAISeq, cryptobyte_asn1.SEQUENCE) {
+		return nil, errors.New("x509: malformed algorithm identifier")
+	}
+	if !bytes.Equal(outerSigAISeq, innerSigAISeq) {
+		return nil, errors.New("x509: inner and outer signature algorithm identifiers don't match")
+	}
 
 	var signature asn1.BitString
 	if !input.ReadASN1BitString(&signature) {
@@ -1200,72 +1176,131 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 	}
 	rl.Signature = signature.RightAlign()
 
+	return rl, nil
+}
+
+// ParseTBSRevocationList parses a TBSCertList from the given ASN.1 DER data.
+// The input is the encoding of the TBSCertList SEQUENCE itself, as produced
+// by CreateTBSRevocationList.
+func ParseTBSRevocationList(der []byte) (*RevocationList, error) {
+	rl, _, err := parseTBSRevocationList(der)
+	if err != nil {
+		return nil, err
+	}
+	if len(der) != len(rl.RawTBSRevocationList) {
+		return nil, errors.New("x509: trailing data")
+	}
+	return rl, nil
+}
+
+// parseTBSRevocationList parses a TBSCertList DER element (including the outer
+// SEQUENCE header). It returns the populated RevocationList and the raw inner
+// signature algorithm identifier element, which ParseRevocationList compares
+// byte-for-byte against the outer algorithm identifier.
+func parseTBSRevocationList(der cryptobyte.String) (*RevocationList, cryptobyte.String, error) {
+	rl := &RevocationList{}
+
+	input := der
+	var tbs cryptobyte.String
+	if !input.ReadASN1Element(&tbs, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed tbs crl")
+	}
+	rl.RawTBSRevocationList = tbs
+	if !tbs.ReadASN1(&tbs, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed tbs crl")
+	}
+
+	var version int
+	if !tbs.PeekASN1Tag(cryptobyte_asn1.INTEGER) {
+		return nil, nil, errors.New("x509: unsupported crl version")
+	}
+	if !tbs.ReadASN1Integer(&version) {
+		return nil, nil, errors.New("x509: malformed crl")
+	}
+	if version != x509v2Version {
+		return nil, nil, fmt.Errorf("x509: unsupported crl version: %d", version)
+	}
+
+	var sigAISeq cryptobyte.String
+	if !tbs.ReadASN1Element(&sigAISeq, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed signature algorithm identifier")
+	}
+	sigAIContents := sigAISeq
+	if !sigAIContents.ReadASN1(&sigAIContents, cryptobyte_asn1.SEQUENCE) {
+		return nil, nil, errors.New("x509: malformed signature algorithm identifier")
+	}
+	sigAI, err := parseAI(sigAIContents)
+	if err != nil {
+		return nil, nil, err
+	}
+	rl.SignatureAlgorithm = getSignatureAlgorithmFromAI(sigAI)
+
 	var issuerSeq cryptobyte.String
 	if !tbs.ReadASN1Element(&issuerSeq, cryptobyte_asn1.SEQUENCE) {
-		return nil, errors.New("x509: malformed issuer")
+		return nil, nil, errors.New("x509: malformed issuer")
 	}
 	rl.RawIssuer = issuerSeq
 	issuerRDNs, err := parseName(issuerSeq)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rl.Issuer.FillFromRDNSequence(issuerRDNs)
 
 	rl.ThisUpdate, err = parseTime(&tbs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if tbs.PeekASN1Tag(cryptobyte_asn1.GeneralizedTime) || tbs.PeekASN1Tag(cryptobyte_asn1.UTCTime) {
 		rl.NextUpdate, err = parseTime(&tbs)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if tbs.PeekASN1Tag(cryptobyte_asn1.SEQUENCE) {
 		var revokedSeq cryptobyte.String
 		if !tbs.ReadASN1(&revokedSeq, cryptobyte_asn1.SEQUENCE) {
-			return nil, errors.New("x509: malformed crl")
+			return nil, nil, errors.New("x509: malformed crl")
 		}
 		for !revokedSeq.Empty() {
 			rce := RevocationListEntry{}
 
 			var certSeq cryptobyte.String
 			if !revokedSeq.ReadASN1Element(&certSeq, cryptobyte_asn1.SEQUENCE) {
-				return nil, errors.New("x509: malformed crl")
+				return nil, nil, errors.New("x509: malformed crl")
 			}
 			rce.Raw = certSeq
 			if !certSeq.ReadASN1(&certSeq, cryptobyte_asn1.SEQUENCE) {
-				return nil, errors.New("x509: malformed crl")
+				return nil, nil, errors.New("x509: malformed crl")
 			}
 
 			rce.SerialNumber = new(big.Int)
 			if !certSeq.ReadASN1Integer(rce.SerialNumber) {
-				return nil, errors.New("x509: malformed serial number")
+				return nil, nil, errors.New("x509: malformed serial number")
 			}
 			rce.RevocationTime, err = parseTime(&certSeq)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			var extensions cryptobyte.String
 			var present bool
 			if !certSeq.ReadOptionalASN1(&extensions, &present, cryptobyte_asn1.SEQUENCE) {
-				return nil, errors.New("x509: malformed extensions")
+				return nil, nil, errors.New("x509: malformed extensions")
 			}
 			if present {
 				for !extensions.Empty() {
 					var extension cryptobyte.String
 					if !extensions.ReadASN1(&extension, cryptobyte_asn1.SEQUENCE) {
-						return nil, errors.New("x509: malformed extension")
+						return nil, nil, errors.New("x509: malformed extension")
 					}
 					ext, err := parseExtension(extension)
 					if err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 					if ext.Id.Equal(oidExtensionReasonCode) {
 						val := cryptobyte.String(ext.Value)
 						if !val.ReadASN1Enum(&rce.ReasonCode) {
-							return nil, fmt.Errorf("x509: malformed reasonCode extension")
+							return nil, nil, fmt.Errorf("x509: malformed reasonCode extension")
 						}
 					}
 					rce.Extensions = append(rce.Extensions, ext)
@@ -1285,38 +1320,38 @@ func ParseRevocationList(der []byte) (*RevocationList, error) {
 	var extensions cryptobyte.String
 	var present bool
 	if !tbs.ReadOptionalASN1(&extensions, &present, cryptobyte_asn1.Tag(0).Constructed().ContextSpecific()) {
-		return nil, errors.New("x509: malformed extensions")
+		return nil, nil, errors.New("x509: malformed extensions")
 	}
 	if present {
 		if !extensions.ReadASN1(&extensions, cryptobyte_asn1.SEQUENCE) {
-			return nil, errors.New("x509: malformed extensions")
+			return nil, nil, errors.New("x509: malformed extensions")
 		}
 		for !extensions.Empty() {
 			var extension cryptobyte.String
 			if !extensions.ReadASN1(&extension, cryptobyte_asn1.SEQUENCE) {
-				return nil, errors.New("x509: malformed extension")
+				return nil, nil, errors.New("x509: malformed extension")
 			}
 			ext, err := parseExtension(extension)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if ext.Id.Equal(oidExtensionAuthorityKeyId) {
 				rl.AuthorityKeyId, err = parseAuthorityKeyIdentifier(ext)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 			} else if ext.Id.Equal(oidExtensionCRLNumber) {
 				value := cryptobyte.String(ext.Value)
 				rl.Number = new(big.Int)
 				if !value.ReadASN1Integer(rl.Number) {
-					return nil, errors.New("x509: malformed crl number")
+					return nil, nil, errors.New("x509: malformed crl number")
 				}
 			}
 			rl.Extensions = append(rl.Extensions, ext)
 		}
 	}
 
-	return rl, nil
+	return rl, sigAISeq, nil
 }
 
 // domainNameValid is an alloc-less version of the checks that

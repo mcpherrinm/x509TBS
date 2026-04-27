@@ -85,6 +85,14 @@ func TestTBSRevocationList(t *testing.T) {
 
 	// Lint the TBS, log it, etc
 
+	parsedTBS := must(x509TBS.ParseTBSRevocationList(tbs))
+	if parsedTBS.Number.Cmp(crlTemplate.Number) != 0 {
+		t.Fatalf("Parsed TBS CRL Number mismatch: %v != %v", parsedTBS.Number, crlTemplate.Number)
+	}
+	if len(parsedTBS.RevokedCertificateEntries) != 1 || parsedTBS.RevokedCertificateEntries[0].SerialNumber.Cmp(big.NewInt(42)) != 0 {
+		t.Fatalf("Parsed TBS CRL entries mismatch: %+v", parsedTBS.RevokedCertificateEntries)
+	}
+
 	der := must(x509TBS.SignTBS(rand.Reader, tbs, x509TBS.ECDSAWithSHA256, ecdsaWithSHA256, priv))
 	rl := must(x509TBS.ParseRevocationList(der))
 
@@ -112,6 +120,14 @@ func TestTBSCertificateRequest(t *testing.T) {
 	tbs := must(x509TBS.CreateTBSCertificateRequest(csrTemplate, &priv.PublicKey))
 
 	// Lint the TBS, log it, etc
+
+	parsedTBS := must(x509TBS.ParseTBSCertificateRequest(tbs))
+	if parsedTBS.Subject.CommonName != csrTemplate.Subject.CommonName {
+		t.Fatalf("Parsed TBS CSR does not match expected subject, %s != %s", parsedTBS.Subject.CommonName, csrTemplate.Subject.CommonName)
+	}
+	if len(parsedTBS.DNSNames) != 1 || parsedTBS.DNSNames[0] != "example.com" {
+		t.Fatalf("Parsed TBS CSR DNSNames mismatch: %v", parsedTBS.DNSNames)
+	}
 
 	der := must(x509TBS.SignTBS(rand.Reader, tbs, x509TBS.ECDSAWithSHA256, ecdsaWithSHA256, priv))
 	csr := must(x509TBS.ParseCertificateRequest(der))
