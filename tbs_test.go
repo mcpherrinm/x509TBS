@@ -58,6 +58,46 @@ func TestCreateCert(t *testing.T) {
 	}
 }
 
+// TestCreateCRL covers the deprecated Certificate.CreateCRL path. New code
+// should use CreateRevocationList instead.
+func TestCreateCRL(t *testing.T) {
+	priv := must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+
+	issuerDER := must(x509TBS.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv))
+	issuer := must(x509TBS.ParseCertificate(issuerDER))
+
+	revoked := []pkix.RevokedCertificate{
+		{
+			SerialNumber:   big.NewInt(1234),
+			RevocationTime: time.Now().Add(-time.Minute),
+		},
+	}
+
+	now := time.Now().Add(-time.Hour)
+	expiry := time.Now().Add(time.Hour)
+
+	der := must(issuer.CreateCRL(rand.Reader, priv, revoked, now, expiry))
+
+	var crl pkix.CertificateList
+	if rest, err := asn1.Unmarshal(der, &crl); err != nil {
+		t.Fatalf("Unmarshal CRL: %v", err)
+	} else if len(rest) != 0 {
+		t.Fatalf("trailing data after CRL: %d bytes", len(rest))
+	}
+
+	algo := x509TBS.ECDSAWithSHA256
+	if err := issuer.CheckSignature(algo, crl.TBSCertList.Raw, crl.SignatureValue.RightAlign()); err != nil {
+		t.Fatalf("CheckSignature: %v", err)
+	}
+
+	if got := len(crl.TBSCertList.RevokedCertificates); got != 1 {
+		t.Fatalf("expected 1 revoked entry, got %d", got)
+	}
+	if got := crl.TBSCertList.RevokedCertificates[0].SerialNumber; got.Cmp(big.NewInt(1234)) != 0 {
+		t.Fatalf("unexpected revoked serial: %v", got)
+	}
+}
+
 // TestCreateRevocationList asserts that the end-to-end CreateRevocationList
 // path is unchanged after the TBS extraction.
 func TestCreateRevocationList(t *testing.T) {
