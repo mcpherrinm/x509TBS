@@ -58,6 +58,64 @@ func TestCreateCert(t *testing.T) {
 	}
 }
 
+// TestCreateRevocationList asserts that the end-to-end CreateRevocationList
+// path is unchanged after the TBS extraction.
+func TestCreateRevocationList(t *testing.T) {
+	priv := must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+
+	issuerDER := must(x509TBS.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv))
+	issuer := must(x509TBS.ParseCertificate(issuerDER))
+
+	crlTemplate := &x509TBS.RevocationList{
+		Number:     big.NewInt(7),
+		ThisUpdate: time.Now().Add(-time.Hour),
+		NextUpdate: time.Now().Add(time.Hour),
+		RevokedCertificateEntries: []x509TBS.RevocationListEntry{
+			{
+				SerialNumber:   big.NewInt(99),
+				RevocationTime: time.Now().Add(-time.Minute),
+			},
+		},
+	}
+
+	der := must(x509TBS.CreateRevocationList(rand.Reader, crlTemplate, issuer, priv))
+	rl := must(x509TBS.ParseRevocationList(der))
+
+	if err := rl.CheckSignatureFrom(issuer); err != nil {
+		t.Fatalf("CheckSignatureFrom: %v", err)
+	}
+	if rl.Number.Cmp(crlTemplate.Number) != 0 {
+		t.Fatalf("Parsed CRL Number mismatch: %v != %v", rl.Number, crlTemplate.Number)
+	}
+	if len(rl.RevokedCertificateEntries) != 1 || rl.RevokedCertificateEntries[0].SerialNumber.Cmp(big.NewInt(99)) != 0 {
+		t.Fatalf("unexpected revoked entries: %+v", rl.RevokedCertificateEntries)
+	}
+}
+
+// TestCreateCertificateRequest asserts that the end-to-end
+// CreateCertificateRequest path is unchanged after the TBS extraction.
+func TestCreateCertificateRequest(t *testing.T) {
+	priv := must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+
+	csrTemplate := &x509TBS.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "create-csr-test"},
+		DNSNames: []string{"create.example.com"},
+	}
+
+	der := must(x509TBS.CreateCertificateRequest(rand.Reader, csrTemplate, priv))
+	csr := must(x509TBS.ParseCertificateRequest(der))
+
+	if err := csr.CheckSignature(); err != nil {
+		t.Fatalf("CheckSignature: %v", err)
+	}
+	if csr.Subject.CommonName != csrTemplate.Subject.CommonName {
+		t.Fatalf("Parsed CSR does not match expected subject, %s != %s", csr.Subject.CommonName, csrTemplate.Subject.CommonName)
+	}
+	if len(csr.DNSNames) != 1 || csr.DNSNames[0] != "create.example.com" {
+		t.Fatalf("Parsed CSR DNSNames mismatch: %v", csr.DNSNames)
+	}
+}
+
 func TestTBSRevocationList(t *testing.T) {
 	priv := must(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
 
