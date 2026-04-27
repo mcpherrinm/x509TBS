@@ -971,11 +971,7 @@ func parseTBSCertificate(der cryptobyte.String) (*Certificate, cryptobyte.String
 		return nil, nil, errors.New("x509: malformed serial number")
 	}
 	if serial.Sign() == -1 {
-		//if x509negativeserial.Value() != "1" {
 		return nil, nil, errors.New("x509: negative serial number")
-		//} else {
-		//	x509negativeserial.IncNonDefault()
-		//}
 	}
 	cert.SerialNumber = serial
 
@@ -1101,10 +1097,6 @@ func parseTBSCertificate(der cryptobyte.String) (*Certificate, cryptobyte.String
 }
 
 // ParseCertificate parses a single certificate from the given ASN.1 DER data.
-//
-// Before Go 1.23, ParseCertificate accepted certificates with negative serial
-// numbers. This behavior can be restored by including "x509negativeserial=1" in
-// the GODEBUG environment variable.
 func ParseCertificate(der []byte) (*Certificate, error) {
 	cert, err := parseCertificate(der)
 	if err != nil {

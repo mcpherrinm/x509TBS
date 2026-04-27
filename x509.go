@@ -16,7 +16,6 @@ import (
 	_ "crypto/sha512"
 	"crypto/x509/pkix"
 	"encoding/asn1"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -30,13 +29,6 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 	cryptobyte_asn1 "golang.org/x/crypto/cryptobyte/asn1"
 )
-
-// pkixPublicKey reflects a PKIX public key structure. See SubjectPublicKeyInfo
-// in RFC 3280.
-type pkixPublicKey struct {
-	Algo      pkix.AlgorithmIdentifier
-	BitString asn1.BitString
-}
 
 func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.AlgorithmIdentifier, err error) {
 	switch pub := pub.(type) {
@@ -97,12 +89,6 @@ func marshalPublicKey(pub any) (publicKeyBytes []byte, publicKeyAlgorithm pkix.A
 
 // These structures reflect the ASN.1 structure of X.509 certificates.:
 
-type certificate struct {
-	TBSCertificate     asn1.RawValue
-	SignatureAlgorithm pkix.AlgorithmIdentifier
-	SignatureValue     asn1.BitString
-}
-
 type tbsCertificate struct {
 	Raw                asn1.RawContent
 	Version            int `asn1:"optional,explicit,default:0,tag:0"`
@@ -115,10 +101,6 @@ type tbsCertificate struct {
 	UniqueId           asn1.BitString   `asn1:"optional,tag:1"`
 	SubjectUniqueId    asn1.BitString   `asn1:"optional,tag:2"`
 	Extensions         []pkix.Extension `asn1:"omitempty,optional,explicit,tag:3"`
-}
-
-type dsaAlgorithmParameters struct {
-	P, Q, G *big.Int
 }
 
 type validity struct {
@@ -843,10 +825,6 @@ func (c *Certificate) Equal(other *Certificate) bool {
 	return bytes.Equal(c.Raw, other.Raw)
 }
 
-func (c *Certificate) hasSANExtension() bool {
-	return oidInExtensions(oidExtensionSubjectAltName, c.Extensions)
-}
-
 // CheckSignatureFrom verifies that the signature on c is a valid signature from parent.
 //
 // This is a low-level API that performs very limited checks, and not a full
@@ -882,19 +860,6 @@ func (c *Certificate) CheckSignatureFrom(parent *Certificate) error {
 // signatures are currently accepted.
 func (c *Certificate) CheckSignature(algo SignatureAlgorithm, signed, signature []byte) error {
 	return checkSignature(algo, signed, signature, c.PublicKey, true)
-}
-
-func (c *Certificate) hasNameConstraints() bool {
-	return oidInExtensions(oidExtensionNameConstraints, c.Extensions)
-}
-
-func (c *Certificate) getSANExtension() []byte {
-	for _, e := range c.Extensions {
-		if e.Id.Equal(oidExtensionSubjectAltName) {
-			return e.Value
-		}
-	}
-	return nil
 }
 
 func signaturePublicKeyAlgoMismatchError(expectedPubKeyAlgo PublicKeyAlgorithm, pubKey any) error {
@@ -967,14 +932,6 @@ func checkSignature(algo SignatureAlgorithm, signed, signature []byte, publicKey
 	return ErrUnsupportedAlgorithm
 }
 
-// CheckCRLSignature checks that the signature in crl is from c.
-//
-// Deprecated: Use [RevocationList.CheckSignatureFrom] instead.
-func (c *Certificate) CheckCRLSignature(crl *pkix.CertificateList) error {
-	algo := getSignatureAlgorithmFromAI(crl.SignatureAlgorithm)
-	return c.CheckSignature(algo, crl.TBSCertList.Raw, crl.SignatureValue.RightAlign())
-}
-
 type UnhandledCriticalExtension struct{}
 
 func (h UnhandledCriticalExtension) Error() string {
@@ -984,12 +941,6 @@ func (h UnhandledCriticalExtension) Error() string {
 type basicConstraints struct {
 	IsCA       bool `asn1:"optional"`
 	MaxPathLen int  `asn1:"optional,default:-1"`
-}
-
-// RFC 5280 4.2.1.4
-type policyInformation struct {
-	Policy asn1.ObjectIdentifier
-	// policyQualifiers omitted
 }
 
 const (
@@ -1597,22 +1548,12 @@ func CreateTBSCertificate(rand io.Reader, template, parent *Certificate, pub any
 
 	subjectKeyId := template.SubjectKeyId
 	if len(subjectKeyId) == 0 && template.IsCA {
-		/*if x509sha256skid.Value() == "0" {
-			x509sha256skid.IncNonDefault()
-			// SubjectKeyId generated using method 1 in RFC 5280, Section 4.2.1.2:
-			//   (1) The keyIdentifier is composed of the 160-bit SHA-1 hash of the
-			//   value of the BIT STRING subjectPublicKey (excluding the tag,
-			//   length, and number of unused bits).
-			h := sha1.Sum(publicKeyBytes)
-			subjectKeyId = h[:]
-		} else {*/
 		// SubjectKeyId generated using method 1 in RFC 7093, Section 2:
 		//    1) The keyIdentifier is composed of the leftmost 160-bits of the
 		//    SHA-256 hash of the value of the BIT STRING subjectPublicKey
 		//    (excluding the tag, length, and number of unused bits).
 		h := sha256.Sum256(publicKeyBytes)
 		subjectKeyId = h[:20]
-		//}
 	}
 
 	extensions, err := buildCertExtensions(template, bytes.Equal(asn1Subject, emptyASN1Subject), authorityKeyId, subjectKeyId)
@@ -1686,42 +1627,6 @@ func CreateCertificate(rand io.Reader, template, parent *Certificate, pub, priv 
 	}
 
 	return SignTBS(rand, tbsCertContents, signatureAlgorithm, algorithmIdentifier, key)
-}
-
-// pemCRLPrefix is the magic string that indicates that we have a PEM encoded
-// CRL.
-var pemCRLPrefix = []byte("-----BEGIN X509 CRL")
-
-// pemType is the type of a PEM encoded CRL.
-var pemType = "X509 CRL"
-
-// ParseCRL parses a CRL from the given bytes. It's often the case that PEM
-// encoded CRLs will appear where they should be DER encoded, so this function
-// will transparently handle PEM encoding as long as there isn't any leading
-// garbage.
-//
-// Deprecated: Use [ParseRevocationList] instead.
-func ParseCRL(crlBytes []byte) (*pkix.CertificateList, error) {
-	if bytes.HasPrefix(crlBytes, pemCRLPrefix) {
-		block, _ := pem.Decode(crlBytes)
-		if block != nil && block.Type == pemType {
-			crlBytes = block.Bytes
-		}
-	}
-	return ParseDERCRL(crlBytes)
-}
-
-// ParseDERCRL parses a DER encoded CRL from the given bytes.
-//
-// Deprecated: Use [ParseRevocationList] instead.
-func ParseDERCRL(derBytes []byte) (*pkix.CertificateList, error) {
-	certList := new(pkix.CertificateList)
-	if rest, err := asn1.Unmarshal(derBytes, certList); err != nil {
-		return nil, err
-	} else if len(rest) != 0 {
-		return nil, errors.New("x509: trailing data after CRL")
-	}
-	return certList, nil
 }
 
 // CreateCRL returns a DER encoded CRL, signed by this Certificate, that
